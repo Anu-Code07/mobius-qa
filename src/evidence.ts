@@ -9,7 +9,17 @@ export interface Evidence {
   quote: string;
 }
 
-const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').replace(/[“”"']/g, '').trim();
+/** Compare text as a person reads it: JSON escapes undone (\\n, \\"), quotes and punctuation spacing ignored. */
+export const norm = (s: string) => s.replace(/\\[nrt]/g, ' ').replace(/\\(["'\\/])/g, '$1').toLowerCase()
+  .replace(/[“”"'`]/g, '').replace(/\s+/g, ' ').trim();
+/** A quote is found if it appears verbatim, or (when it spans adjacent screen elements) every word of it appears. */
+export function quoteIn(output: string, quote: string): boolean {
+  const o = norm(output), q = norm(quote);
+  if (!q) return false;
+  if (o.includes(q)) return true;
+  const words = q.split(/[\s·:,()\[\]]+/).filter(w => w.length > 0);
+  return words.length > 1 && words.every(w => o.includes(w));
+}
 
 /** The trace step a ref points at: "step:N" (1-based), or the step whose output carries that observation id. */
 export function resolveRef(ref: string, trace: TraceStep[]): TraceStep | null {
@@ -34,7 +44,7 @@ export function verifyVerdict(v: Verdict, trace: TraceStep[]): { verdict: Verdic
     for (const ev of e.evidence) {
       const step = resolveRef(ev.ref, trace);
       if (!step) return { expectation: e.text, ok: false, why: `evidence ref ${ev.ref} not found in the trace` };
-      if (!norm(step.output).includes(norm(ev.quote))) return { expectation: e.text, ok: false, why: `quote "${ev.quote.slice(0, 60)}" is not in ${ev.ref}` };
+      if (!quoteIn(step.output, ev.quote)) return { expectation: e.text, ok: false, why: `quote "${ev.quote.slice(0, 60)}" is not in ${ev.ref}` };
     }
     return { expectation: e.text, ok: true, why: `verified in ${e.evidence.map(x => x.ref).join(', ')}` };
   });

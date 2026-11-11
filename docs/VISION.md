@@ -18,9 +18,9 @@ mobius-qa makes that safe (via Mobius) and maintainable (via an agent that self-
 |---|---|---|---|
 | 1. Runner | Plain-English scenarios → agent run → evidence-checked verdict + trace | "I wrote a test in English and it ran." | **Built**: verdicts are re-graded against the trace; unsupported claims fail |
 | 2. Monitor | Scheduled deterministic replays of production journeys; LLM only on drift; Slack alerts with evidence | "It told me checkout broke 4 minutes after the deploy." | **Built (v1)**: `replay`, `monitor --every`, self-healing on drift, Slack alerts on transitions |
-| 3. Release guard | Runs on every build, PR preview and staged rollout; diffs against the last release; can block a rollout | "Version 4.12 broke the coupon flow on Android, so the rollout was paused." | Next |
-| 4. Autonomous QA engineer | Crawls the app, proposes journeys, writes and maintains them, triages bug vs. flake vs. UI change, files Jira tickets | "I don't write tests. I approve the ones it suggests and fix the bugs it files." | Later |
-| 5. Reliability layer | Per-step latency, accessibility, localization, crashes, payment-gateway health, competitor benchmarks | "It's how we know our app works for real users, everywhere, all the time." | Later |
+| 3. Release guard | Runs on every build, PR preview and staged rollout; diffs against the last release; can block a rollout | "Version 4.12 broke the coupon flow on Android, so the rollout was paused." | **Built (v1)**: `guard` diffs against the last good build, blocks on new failures and slowdowns; GitHub Actions example. Plus `release`: a full go/no-go (build, store rules, permissions/size diff, journeys, human checklist, staged rollout with monitor-driven halt) |
+| 4. Autonomous QA engineer | Crawls the app, proposes journeys, writes and maintains them, triages bug vs. flake vs. UI change, files Jira tickets | "I don't write tests. I approve the ones it suggests and fix the bugs it files." | **Built (v1)**: `discover` proposes journeys; triage (bug / flake / UI change / infra) by retry; Jira tickets with repro steps. Maintaining journeys = self-healing replays |
+| 5. Reliability layer | Per-step latency, accessibility, localization, crashes, payment-gateway health, competitor benchmarks | "It's how we know our app works for real users, everywhere, all the time." | **Started**: per-step latency, accessibility count, crash/app-exit detection on every replay. Next: localization, payment-gateway health, competitor benchmarks |
 
 ## Principles
 

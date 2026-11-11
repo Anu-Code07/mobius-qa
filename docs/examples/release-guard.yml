@@ -1,0 +1,31 @@
+# Release guard (stage 3): run every critical journey against each build and block the rollout if one breaks or slows down.
+# Needs a runner with a device attached (self-hosted Mac/Linux with an emulator, or a device-cloud bridge).
+name: mobius-qa release guard
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      build: { description: "Build / version label", required: true }
+jobs:
+  guard:
+    runs-on: [self-hosted, mobile]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: { repository: Anu-Code07/mobius, path: mobius }
+      - uses: actions/checkout@v4
+        with: { repository: Anu-Code07/mobius-qa, path: mobius-qa }
+      - run: (cd mobius && npm ci) && (cd mobius-qa && npm ci)
+      - name: Install the build under test
+        run: adb -s "$DEVICE" install -r app/build/outputs/apk/release/app-release.apk
+      - name: Guard
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}   # only used when the UI drifted and a journey must self-heal
+          MOBIUS_QA_SLACK_WEBHOOK: ${{ secrets.MOBIUS_QA_SLACK_WEBHOOK }}
+        run: |
+          node mobius-qa/src/cli.ts guard qa/journeys --device "$DEVICE" --live \
+            --mobius mobius --build "${{ github.event.inputs.build || github.sha }}" \
+            --history qa/.builds --scripts qa/.replays --summary guard.md
+      - uses: actions/cache/save@v4   # keep replay scripts and build history between runs
+        if: always()
+        with: { path: "qa/.builds\nqa/.replays", key: "mobius-qa-${{ github.run_id }}" }

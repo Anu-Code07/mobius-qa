@@ -5,6 +5,9 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { compile, loadScript, replay, saveScript, type Call, type ReplayResult } from './replay.ts';
 import { runScenario, type RunResult } from './runner.ts';
 import type { Scenario } from './scenario.ts';
+import type { Category } from './triage.ts';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 export interface MonitorOptions {
   mobiusDir: string;
@@ -38,7 +41,8 @@ export async function withMobius<T>(o: MonitorOptions, sc: Scenario, fn: (call: 
     const r: any = await client.callTool({ name: tool, arguments: { device_id: o.device.id, ...args } }, undefined, { timeout: 180_000 });
     const text = (r.content ?? []).filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n');
     let json: any = null; try { json = JSON.parse(text); } catch { /* non-JSON */ }
-    return { text, json };
+    const img = (r.content ?? []).find((c: any) => c.type === 'image');
+    return { text, json, ...(img ? { image: { data: img.data, mimeType: img.mimeType } } : {}) };
   };
   try { return await fn(call); } finally { await client.close(); }
 }
@@ -61,13 +65,27 @@ export async function checkScenario(sc: Scenario, o: MonitorOptions): Promise<Ch
   return { scenario: sc.id, status, mode: 'agent', reason, cost_usd: run.costUsd, duration_ms: Date.now() - t0, run, ...(rep ? { replay: rep } : {}) };
 }
 
-/** Alert on transitions only (newly failing, recovered), so a broken journey pages once, not every interval. */
-export async function notify(o: MonitorOptions, c: CheckOutcome, prev: CheckOutcome['status'] | undefined) {
-  const bad = c.status === 'fail' || c.status === 'error';
-  const wasBad = prev === 'fail' || prev === 'error';
+/** Save the failure screenshot next to the run, for the alert and the ticket. */
+export function saveFailureShot(dir: string, c: CheckOutcome): string | null {
+  const img = c.replay?.failure_screenshot;
+  if (!img) return null;
+  mkdirSync(dir, { recursive: true });
+  const f = join(dir, `${c.scenario}-${new Date().toISOString().replace(/[:.]/g, '-')}.${img.mimeType.includes('png') ? 'png' : 'jpg'}`);
+  writeFileSync(f, Buffer.from(img.data, 'base64'));
+  return f;
+}
+
+/**
+ * Alert on transitions only, and only for real problems: a confirmed bug pages; recovery is announced;
+ * flakes and self-healed UI changes never page (they show up in the log and the release-guard summary).
+ */
+export async function notify(o: MonitorOptions, c: CheckOutcome, category: Category, prev: Category | undefined, extra: { jira?: string | null; shot?: string | null } = {}) {
+  const bad = category === 'bug';
+  const wasBad = prev === 'bug';
   if (bad === wasBad || !o.slackWebhook) return;
   const text = bad
-    ? `:rotating_light: *${c.scenario}* is failing on ${o.device.platform} (${o.device.id}): ${c.reason}`
+    ? `:rotating_light: *${c.scenario}* is broken on ${o.device.platform} (${o.device.id}), confirmed on retry: ${c.reason}` +
+      (extra.jira ? `\nJira: ${extra.jira}` : '') + (extra.shot ? `\nScreenshot: ${extra.shot}` : '')
     : `:white_check_mark: *${c.scenario}* recovered on ${o.device.platform}: ${c.reason}`;
   await fetch(o.slackWebhook, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) }).catch(() => {});
 }

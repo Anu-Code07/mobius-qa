@@ -4,6 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RunResult, TraceStep } from './runner.ts';
+import { quoteIn } from './evidence.ts';
 
 export interface Selector { role: string; text: string | null; label: string | null; rid: string | null }
 export interface ReplayStep {
@@ -80,32 +81,85 @@ export function findElement(elements: any[], sel: Selector): any | null {
   return null;
 }
 
-export type Call = (tool: string, args: Record<string, unknown>) => Promise<{ text: string; json: any }>;
+/** How many recorded steps a replay may skip to resynchronise with the screen. */
+export const RESYNC_WINDOW = 4;
+
+export type Call = (tool: string, args: Record<string, unknown>) => Promise<{ text: string; json: any; image?: { data: string; mimeType: string } }>;
+
+/** Reliability signals collected on every replay (stage 5): beyond pass/fail. */
+export interface Reliability {
+  /** Wall time per step, ms (action + settle). */
+  step_ms: { step: number; tool: string; target: string; ms: number }[];
+  /** Screens seen and how many actionable controls had no label (what a screen reader can't announce). */
+  accessibility: { screens: number; unlabeled_controls: number; actionable_controls: number; sparse_screens: number };
+  /** The app left the foreground mid-journey (crash, ANR kill, unexpected handoff). */
+  app_exits: { step: number; to: string | null }[];
+}
 export interface ReplayResult {
   status: 'pass' | 'fail' | 'drift';
   reason: string;
   steps_run: number;
   missing_quotes: string[];
   duration_ms: number;
+  reliability: Reliability;
+  /** Screenshot of the screen where it failed or drifted (base64), for alerts and tickets. */
+  failure_screenshot?: { data: string; mimeType: string };
 }
 
-const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').replace(/[“”"']/g, '');
 
 /** Run a script. No model involved: cost is device time only. */
 export async function replay(script: ReplayScript, call: Call, waitMs = 600): Promise<ReplayResult> {
   const t0 = Date.now();
   const seen: string[] = [];
-  const done = (status: ReplayResult['status'], reason: string, i: number, missing: string[] = []): ReplayResult =>
-    ({ status, reason, steps_run: i, missing_quotes: missing, duration_ms: Date.now() - t0 });
+  const rel: Reliability = { step_ms: [], accessibility: { screens: 0, unlabeled_controls: 0, actionable_controls: 0, sparse_screens: 0 }, app_exits: [] };
+  const looked = new Set<string>();
+  const observe = async (step: number) => {
+    const o = await call('observe', {});
+    seen.push(o.text);
+    const j = o.json;
+    if (j?.observation_id && !looked.has(j.observation_id)) {
+      looked.add(j.observation_id);
+      const act = (j.elements ?? []).filter((e: any) => e.role === 'button' || e.role === 'textbox' || (e.flags ?? []).includes?.('clickable'));
+      rel.accessibility.screens++;
+      rel.accessibility.actionable_controls += act.length;
+      rel.accessibility.unlabeled_controls += act.filter((e: any) => !e.text && !e.label).length;
+      if (j.tree_quality && j.tree_quality !== 'good') rel.accessibility.sparse_screens++;
+    }
+    if (step > 0 && j?.foreground_app && j.foreground_app !== script.app) rel.app_exits.push({ step, to: j.foreground_app });
+    return o;
+  };
+  const done = async (status: ReplayResult['status'], reason: string, i: number, missing: string[] = []): Promise<ReplayResult> => {
+    const r: ReplayResult = { status, reason, steps_run: i, missing_quotes: missing, duration_ms: Date.now() - t0, reliability: rel };
+    if (status !== 'pass') {
+      const shot = await call('observe', { screenshot: true, max_size: 768 }).catch(() => null);
+      if (shot?.image) r.failure_screenshot = shot.image;
+    }
+    return r;
+  };
+  const skipped: number[] = [];
   for (let i = 0; i < script.steps.length; i++) {
-    const st = script.steps[i]!;
+    let st = script.steps[i]!;
     const args: Record<string, unknown> = { ...st.args };
+    const ts = Date.now();
     if (st.target) {
-      const obs = await call('observe', {});
-      seen.push(obs.text);
-      const e = findElement(obs.json?.elements ?? [], st.target);
-      if (!e) return done('drift', `step ${i + 1} ${st.tool}: no element like ${JSON.stringify(st.target)} on screen`, i);
-      args.element_id = e.id;
+      const obs = await observe(i);
+      let e = findElement(obs.json?.elements ?? [], st.target);
+      if (!e) {
+        // Resync: the recorded run may contain detours for a different start state (e.g. pressing Back out of a
+        // leftover screen). If a later step's element is on screen now, skip ahead to it instead of calling it drift.
+        for (let k = i + 1; k < Math.min(script.steps.length, i + 1 + RESYNC_WINDOW); k++) {
+          const ahead = script.steps[k]!;
+          const hit = ahead.target ? findElement(obs.json?.elements ?? [], ahead.target) : null;
+          if (hit && !ahead.expect_error) { skipped.push(...script.steps.slice(i, k).map((_, n) => i + n + 1)); i = k; e = hit; break; }
+        }
+      }
+      if (e && st !== script.steps[i]) { st = script.steps[i]!; for (const k of Object.keys(args)) delete args[k]; Object.assign(args, st.args); }
+      if (!e) {
+        const exited = rel.app_exits.find(x => x.step === i);
+        return done(exited ? 'fail' : 'drift', exited ? `step ${i + 1}: the app left the foreground (now ${exited.to}): crash or unexpected exit`
+          : `step ${i + 1} ${st.tool}: no element like ${JSON.stringify(st.target)} on screen`, i);
+      }
+      args.element_id = e!.id;
     }
     const r = await call(st.tool, args);
     seen.push(r.text);
@@ -118,12 +172,17 @@ export async function replay(script: ReplayScript, call: Call, waitMs = 600): Pr
         `step ${i + 1} ${st.tool}: ${code ?? 'failed'} ${r.json?.message ?? ''}`.trim(), i + 1);
     }
     await new Promise(res => setTimeout(res, waitMs));
+    rel.step_ms.push({ step: i + 1, tool: st.tool, target: st.target?.text ?? st.target?.label ?? st.target?.rid ?? String(st.args.app_id ?? ''), ms: Date.now() - ts });
   }
-  seen.push((await call('observe', {})).text);
-  const all = norm(seen.join('\n'));
-  const missing = script.checks.flatMap(c => c.quotes).filter(q => !all.includes(norm(q)));
+  await observe(script.steps.length);
+  const all = seen.join('\n');
+  const missing = script.checks.flatMap(c => c.quotes).filter(q => !quoteIn(all, q));
+  if (rel.app_exits.length && !script.steps.some(s => s.tool === 'open_url')) {
+    return done('fail', `the app left the foreground at step ${rel.app_exits[0]!.step} (now ${rel.app_exits[0]!.to}): crash or unexpected exit`, script.steps.length);
+  }
+  const note = skipped.length ? ` (skipped recorded detour steps ${skipped.join(', ')})` : '';
   return missing.length ? done('fail', `expected evidence not seen: ${missing.map(q => `"${q}"`).join(', ')}`, script.steps.length, missing)
-    : done('pass', `all ${script.checks.length} expectations re-verified`, script.steps.length);
+    : done('pass', `all ${script.checks.length} expectations re-verified${note}`, script.steps.length);
 }
 
 export const scriptPath = (dir: string, id: string, platform: string) => join(dir, `${id}.${platform}.json`);

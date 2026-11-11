@@ -96,3 +96,12 @@ test('element matching survives re-renders but refuses ambiguity', () => {
   assert.equal(findElement([{ id: 'a', role: 'button', text: 'Add' }], sel).id, 'a');
   assert.equal(findElement([{ id: 'a', role: 'button', text: 'Add', label: 'x' }, { id: 'b', role: 'button', text: 'Add', label: 'y' }], sel), null);
 });
+
+test('evidence: quotes match through JSON escapes and across adjacent elements (real-run regression)', async () => {
+  const { quoteIn } = await import('../src/evidence.ts');
+  const out = JSON.stringify({ message: 'User rejected: single tap on button "Place order"', elements: [{ text: 'Total\n₹349' }] });
+  assert.ok(quoteIn(out, 'User rejected: single tap on button "Place order"'));
+  assert.ok(quoteIn(out, 'Total\n₹349'));
+  assert.ok(quoteIn(JSON.stringify({ elements: [{ text: 'Total' }, { text: '₹349' }] }), 'Total ₹349'));
+  assert.ok(!quoteIn(out, 'Total ₹299'), 'a wrong amount still fails');
+});

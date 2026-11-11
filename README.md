@@ -34,10 +34,23 @@ npm install
 node src/cli.ts run     scenarios/fixture --device <id>     # agent run, evidence-checked; passing runs compile to replay scripts
 node src/cli.ts replay  scenarios/fixture --device <id>     # deterministic replay, no LLM
 node src/cli.ts monitor scenarios/fixture --device <id> --every 15m --slack <webhook-url> --live
+node src/cli.ts guard   scenarios/fixture --device <id> --build 4.12.0 --live             # CI: exit 1 blocks the rollout
+node src/cli.ts discover --app com.example.shop --device <id>                             # propose journeys to watch
+node src/cli.ts release --artifact app-release.apk --notes fastlane/metadata --guard scenarios --device <id>   # go / no-go
 ```
 
 - `--live`: rejects every approval, for safe read-only testing of production apps.
-- `monitor`: replays on schedule, heals on UI drift, posts to Slack when a journey starts failing and when it recovers (`--once` for a single pass, e.g. from cron or CI).
+- `monitor`: replays on schedule, heals on UI drift, retries every failure once to triage it (**bug · flake · UI change · infra**), pages Slack only for confirmed bugs (with a failure screenshot), and files a Jira ticket with repro steps when `JIRA_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT` are set. `--once` for a single pass.
+- `guard`: the **release guard**. Runs every journey against a build, compares with the last good build, and exits 1 (block the rollout) on a new failure or a step that got ≥1.5× and ≥1 s slower. Writes a Markdown summary for the PR (also to `$GITHUB_STEP_SUMMARY`). Example workflow: [docs/examples/release-guard.yml](docs/examples/release-guard.yml).
+- `discover --app <id>`: the agent explores the app like a new user (every approval rejected) and proposes the journeys worth watching as ready-to-run scenario files in `scenarios/proposed/`. You approve; it monitors.
+- `release --artifact app.apk|app.ipa`: the **release manager**. One go/no-go for a mobile release:
+  - **Build:** same app id, build number goes up, not debuggable, signed with the release key (not the debug key), 64-bit native code.
+  - **Store rules:** Play target API level; iOS privacy manifest and export-compliance key; release notes present for every locale (`--notes <fastlane metadata>`).
+  - **Diff vs the last release:** new sensitive permissions (update Data safety / privacy labels), size growth, raised minimum OS version.
+  - **Real journeys** on a device via the release guard (`--guard <scenarios> --device <id>`): new failures, slower steps, accessibility.
+  - **What only a human can confirm:** crash-free rate, CI suites, backend compatibility, force-update config, feature flags, store listing, compliance, rollback readiness, on-call and support.
+  - A **staged rollout plan** (1 → 5 → 20 → 50 → 100%) whose halt rule is `mobius-qa monitor` confirming a bug. Exit 1 = NO-GO. `--shipped` records this build as the baseline for the next release.
+- Every replay also records **per-step latency**, an **accessibility count** (controls a screen reader can't announce) and **app exits** (a crash mid-journey fails the run).
 - Output of `run`: `runs/<timestamp>/report.html` (self-contained, with evidence per expectation) and `results.json`.
 - On a physical phone, Mobius never auto-approves (`approvals: approved` only takes effect on emulators/simulators).
 
