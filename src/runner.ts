@@ -1,7 +1,8 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Scenario } from './scenario.ts';
+import { verifyVerdict, type Evidence } from './evidence.ts';
 
-export interface Expectation { text: string; met: boolean; evidence: string }
+export interface Expectation { text: string; met: boolean; evidence: Evidence[]; verification?: string }
 export interface Bug { title: string; severity: 'critical' | 'major' | 'minor'; steps: string; evidence: string }
 export interface Verdict {
   status: 'pass' | 'fail' | 'blocked' | 'error';
@@ -31,7 +32,16 @@ const VERDICT_SCHEMA = {
       type: 'array',
       items: {
         type: 'object', additionalProperties: false, required: ['text', 'met', 'evidence'],
-        properties: { text: { type: 'string' }, met: { type: 'boolean' }, evidence: { type: 'string' } },
+        properties: {
+          text: { type: 'string' }, met: { type: 'boolean' },
+          evidence: {
+            type: 'array',
+            items: {
+              type: 'object', additionalProperties: false, required: ['ref', 'quote'],
+              properties: { ref: { type: 'string', description: 'observation id like "o12", or "step:N" for the Nth tool call' }, quote: { type: 'string', description: 'text copied verbatim from that tool result' } },
+            },
+          },
+        },
       },
     },
     bugs: {
@@ -60,7 +70,9 @@ How you work:
 
 When finished, return the verdict:
 - status "pass" only if every expectation is met; "fail" if any is not; "blocked" if the device/app prevented testing; "error" for harness problems.
-- For each expectation give concrete evidence: quoted screen text and observation ids.
+- For each expectation give evidence as {ref, quote}: ref is the observation id ("o12") or "step:N" (Nth tool call, 1-based) and
+  quote is text copied VERBATIM from that tool result (e.g. "₹349", "APPROVAL_REJECTED"). Evidence is machine-checked against the
+  trace; a paraphrase or an invented id fails the run. For "X never appears", cite the last observation and quote what is there instead.
 - Report real defects you notice (wrong totals, broken navigation, missing labels, crashes) as bugs with reproduction steps, even if outside the expectations.`;
 
 export interface RunOptions {
@@ -121,7 +133,7 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
         if (!p) continue;
         const parts = Array.isArray(b.content) ? b.content : [{ type: 'text', text: String(b.content ?? '') }];
         const output = parts.map((c: { type: string; text?: string }) => (c.type === 'text' ? c.text ?? '' : `[${c.type}]`)).join('\n');
-        trace.push({ ...p, output: output.slice(0, 4000), isError: !!b.is_error });
+        trace.push({ ...p, output: output.slice(0, 20_000), isError: !!b.is_error });
         pending.delete(b.tool_use_id);
       }
     } else if (msg.type === 'result') {
@@ -132,10 +144,11 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
     }
   }
 
+  const raw = verdict ?? { status: 'error' as const, summary: `Run ended without a verdict: ${failure}`, expectations: [], bugs: [] };
   return {
     scenario: sc,
     device: opts.device,
-    verdict: verdict ?? { status: 'error', summary: `Run ended without a verdict: ${failure}`, expectations: [], bugs: [] },
+    verdict: verifyVerdict(raw, trace).verdict,
     trace,
     costUsd,
     turns,

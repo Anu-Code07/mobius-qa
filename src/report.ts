@@ -13,7 +13,7 @@ export function renderReport(results: RunResult[], title = 'Mobius QA report'): 
         <b>${esc(r.scenario.title)}</b> <small>${esc(r.device.platform)} · ${(r.durationMs / 1000).toFixed(0)}s · ${r.trace.length} actions · $${r.costUsd.toFixed(2)}</small></summary>
       <p>${esc(r.verdict.summary)}</p>
       <table><tr><th>Expectation</th><th>Met</th><th>Evidence</th></tr>
-        ${r.verdict.expectations.map(e => `<tr><td>${esc(e.text)}</td><td>${e.met ? '✅' : '❌'}</td><td>${esc(e.evidence)}</td></tr>`).join('')}
+        ${r.verdict.expectations.map(e => `<tr><td>${esc(e.text)}</td><td>${e.met ? '✅' : '❌'}</td><td>${e.evidence.map(x => `<code>${esc(x.ref)}</code> “${esc(x.quote)}”`).join('<br>')}<br><small>${esc(e.verification ?? '')}</small></td></tr>`).join('')}
       </table>
       ${r.verdict.bugs.length ? `<h4>Bugs</h4><ul>${r.verdict.bugs.map(b => `<li><b>[${esc(b.severity)}] ${esc(b.title)}</b><br><i>Steps:</i> ${esc(b.steps)}<br><i>Evidence:</i> ${esc(b.evidence)}</li>`).join('')}</ul>` : ''}
       <details><summary>Trace (${r.trace.length} tool calls)</summary><ol>
