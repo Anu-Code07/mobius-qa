@@ -4,6 +4,7 @@
 // mobius-qa monitor <scenario.md|dir>... --device <id> --every 15m [--slack <webhook>] [--once]   (Jira via JIRA_* env)
 // mobius-qa guard   <scenario.md|dir>... --device <id> --build <version>                     exit 1 = block the rollout
 // mobius-qa discover --app <id> --device <id> [--out scenarios/proposed]                     propose journeys to watch
+// mobius-qa fleet    --manifest qa/fleet.json --devices <id,id,...> [--suite all|a,b] [--install]   central runner
 // mobius-qa release  --artifact app.apk|.ipa [--notes <fastlane metadata>] [--guard <scenarios> --device <id>] [--shipped]
 import { mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -12,6 +13,10 @@ import { parseArgs } from 'node:util';
 import { checkScenario, notify, saveFailureShot, withMobius, type MonitorOptions } from './monitor.ts';
 import { discover, writeProposals } from './discover.ts';
 import { compare, lastGoodBuild, saveBuild, summary, type BuildRecord, type GuardVerdict } from './guard.ts';
+import { MAESTRO_INFRA, acquireDevice, assemble, loadManifest, releaseDevice, runHook, runMaestro, shard, suiteSummary, type JobResult } from './fleet.ts';
+import { categorize } from './triage.ts';
+import type { Scenario } from './scenario.ts';
+import { basename } from 'node:path';
 import { DEFAULT_RELEASE, decision, evaluate, lastRelease, notesPresent, readArtifact, report, saveRelease } from './release.ts';
 import { fileJira, jiraFromEnv, ticketFor, triage, type Category } from './triage.ts';
 import { renderReport } from './report.ts';
@@ -44,9 +49,81 @@ const { positionals, values } = parseArgs({
     guard: { type: 'string', multiple: true },
     releases: { type: 'string', default: '.mobius-qa/releases' },
     shipped: { type: 'boolean', default: false },
+    manifest: { type: 'string' },
+    devices: { type: 'string' },
+    suite: { type: 'string', default: 'all' },
+    install: { type: 'boolean', default: false },
   },
 });
 const [cmd, ...targets] = positionals;
+
+if (cmd === 'fleet') {
+  // Central runner: suites from many repos, one install per device, journeys sharded over a locked device pool.
+  if (!values.manifest || !values.devices) { process.stderr.write('usage: mobius-qa fleet --manifest qa/fleet.json --devices <id,id,...> [--suite all|a,b] [--platform android|ios] [--install] [--slack <url>]\n'); process.exit(2); }
+  const m = loadManifest(values.manifest);
+  const jobs = assemble(m, values.suite === 'all' ? 'all' : values.suite!.split(','));
+  const want = values.devices.split(',').map(d => d.trim()).filter(Boolean);
+  const plat = (values.platform ?? (m.app.android ? 'android' : 'ios')) as 'android' | 'ios';
+  const appId = m.app[plat];
+  if (!appId) { process.stderr.write(`manifest has no app.${plat}\n`); process.exit(2); }
+  const live = m.live !== false;
+  const fopts = (id: string): MonitorOptions => ({ mobiusDir: values.mobius!, device: { id, platform: plat }, model: values.model!, scriptsDir: values.scripts!, live, ...(values.slack ? { slackWebhook: values.slack } : {}) });
+
+  // Preflight: lock each device, confirm Mobius sees it online, install/build if asked, confirm the app is there.
+  const pool: string[] = [];
+  const probe = { approvals: 'rejected' } as Scenario;
+  for (const id of want) {
+    if (!acquireDevice(id, `fleet ${process.pid}`)) { process.stderr.write(`⏭  ${id}: busy (locked by another run)\n`); continue; }
+    pool.push(id);
+  }
+  const release = () => pool.forEach(id => releaseDevice(id));
+  process.on('SIGINT', () => { release(); process.exit(130); });
+  process.on('SIGTERM', () => { release(); process.exit(143); });
+  try {
+    const listed = await withMobius(fopts(pool[0] ?? want[0]!), probe, async call => (await call('device_list', {})).json?.devices ?? []);
+    for (const id of [...pool]) {
+      const d = listed.find((x: any) => x.device_id === id);
+      if (!d?.online) { process.stderr.write(`⏭  ${id}: not online (Mobius sees: ${listed.map((x: any) => x.device_id).join(', ') || 'none'})\n`); pool.splice(pool.indexOf(id), 1); releaseDevice(id); }
+    }
+    if (values.install && m.install) {
+      const res = await Promise.all(pool.map(async id => ({ id, ...(await runHook(m.install!, { DEVICE: id, PLATFORM: plat })) })));
+      for (const r of res) if (!r.ok) { process.stderr.write(`⏭  ${r.id}: install failed\n${r.out}\n`); pool.splice(pool.indexOf(r.id), 1); releaseDevice(r.id); }
+    }
+    for (const id of [...pool]) {
+      const apps = await withMobius(fopts(id), probe, async call => (await call('list_apps', {})).text);
+      if (!apps.includes(appId)) { process.stderr.write(`⏭  ${id}: ${appId} not installed (use --install with an "install" hook)\n`); pool.splice(pool.indexOf(id), 1); releaseDevice(id); }
+    }
+    if (!pool.length) { process.stderr.write('No usable devices.\n'); process.exit(2); }
+    process.stderr.write(`Fleet: ${jobs.length} journeys · ${new Set(jobs.map(j => j.suite)).size} suites · ${pool.length} devices (${pool.join(', ')})${live ? ' · LIVE: every approval rejected' : ''}\n`);
+
+    const results = await shard(jobs, pool, async (job, id): Promise<JobResult> => {
+      const t0 = Date.now();
+      const retries = m.retries?.[job.suite] ?? 1;
+      if (job.kind === 'maestro') {
+        let r = await runMaestro(job.file, id, appId), tries = 0, first = r.ok;
+        while (!r.ok && tries++ < retries) r = await runMaestro(job.file, id, appId);
+        const category: Category = r.ok ? (first ? 'ok' : 'flake') : MAESTRO_INFRA.test(r.out) ? 'infra' : 'bug';
+        const res = { job, device: id, category, reason: r.ok ? 'passed' : (r.out.split('\n').filter(Boolean).slice(-3).join(' ').slice(0, 300) || 'failed'), duration_ms: Date.now() - t0, cost_usd: 0 };
+        process.stderr.write(`▶ [${id}] ${job.suite}/${basename(job.file)}: ${category.toUpperCase()}\n`);
+        return res;
+      }
+      const sc = { ...loadScenario(job.file), ...(live ? { approvals: 'rejected' as const } : {}) };
+      const o = fopts(id);
+      const t = retries === 0 ? await (async () => { const c = await checkScenario(sc, o); return { outcome: c, category: categorize(c), retried: false }; })()
+        : await triage(() => checkScenario(sc, o));
+      const shot = t.category === 'bug' ? saveFailureShot(join(values.out!, 'screenshots', job.suite), t.outcome) : null;
+      process.stderr.write(`▶ [${id}] ${job.suite}/${sc.id}: ${t.category.toUpperCase()} via ${t.outcome.mode} · $${t.outcome.cost_usd.toFixed(2)}\n`);
+      return { job, device: id, category: t.category, reason: t.outcome.reason, duration_ms: Date.now() - t0, cost_usd: t.outcome.cost_usd, shot };
+    });
+    const text = suiteSummary(results);
+    mkdirSync(values.out!, { recursive: true });
+    writeFileSync(join(values.out!, 'fleet-results.json'), JSON.stringify(results, null, 2));
+    process.stdout.write(text + '\n');
+    if (values.slack) await fetch(values.slack, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) }).catch(() => {});
+    process.exitCode = results.some(r => r.category === 'bug') ? 1 : 0;
+  } finally { release(); }
+  process.exit(process.exitCode ?? 0);
+}
 
 if (cmd === 'release') {
   // Release manager: build checks + last-release diff + real journeys (optional) + manual checklist + rollout plan.
