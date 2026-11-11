@@ -5,6 +5,7 @@
 // mobius-qa guard   <scenario.md|dir>... --device <id> --build <version>                     exit 1 = block the rollout
 // mobius-qa discover --app <id> --device <id> [--out scenarios/proposed]                     propose journeys to watch
 // mobius-qa fleet    --manifest qa/fleet.json --devices <id,id,...> [--suite all|a,b] [--install]   central runner
+// mobius-qa import-maestro <flow.yaml|dir>... --platform android|ios [--app <id>] [--out scenarios/imported]   guard your Maestro flows
 // mobius-qa release  --artifact app.apk|.ipa [--notes <fastlane metadata>] [--guard <scenarios> --device <id>] [--shipped]
 import { mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -13,6 +14,7 @@ import { parseArgs } from 'node:util';
 import { checkScenario, notify, saveFailureShot, withMobius, type MonitorOptions } from './monitor.ts';
 import { discover, writeProposals } from './discover.ts';
 import { compare, lastGoodBuild, saveBuild, summary, type BuildRecord, type GuardVerdict } from './guard.ts';
+import { convertFlow, writeImport } from './maestro.ts';
 import { MAESTRO_INFRA, acquireDevice, assemble, loadManifest, releaseDevice, runHook, runMaestro, shard, suiteSummary, type JobResult } from './fleet.ts';
 import { categorize } from './triage.ts';
 import type { Scenario } from './scenario.ts';
@@ -56,6 +58,25 @@ const { positionals, values } = parseArgs({
   },
 });
 const [cmd, ...targets] = positionals;
+
+if (cmd === 'import-maestro') {
+  // Maestro flow → Mobius replay script + plain-English scenario: same journey, now behind Mobius's safety gate.
+  const plat = (values.platform ?? 'android') as 'android' | 'ios';
+  const files = targets.flatMap(t => statSync(t).isDirectory() ? readdirSync(t).filter(f => /\.ya?ml$/.test(f) && !f.startsWith('_')).sort().map(f => join(t, f)) : [t]);
+  if (!files.length) { process.stderr.write('usage: mobius-qa import-maestro <flow.yaml|dir>... --platform android|ios [--app <id>] [--out scenarios/imported] [--scripts .mobius-qa/replays]\n'); process.exit(2); }
+  const outDir = values.out === 'runs' ? 'scenarios/imported' : values.out!;
+  let gaps = 0;
+  for (const f of files) {
+    try {
+      const c = convertFlow(f, { platform: plat, ...(values.app ? { app: values.app } : {}) });
+      const md = writeImport(c, outDir, values.scripts!, plat);
+      gaps += c.unsupported.length;
+      process.stderr.write(`✔ ${basename(f)} → ${md} · ${c.script.steps.length} guarded steps · ${c.script.checks.length} checks${c.unsupported.length ? ` · ⚠ not converted: ${c.unsupported.join('; ')}` : ''}\n`);
+    } catch (e) { process.stderr.write(`✖ ${basename(f)}: ${(e as Error).message}\n`); gaps++; }
+  }
+  process.stderr.write(`\nRun them through Mobius: mobius-qa replay ${outDir} --device <id>  (or monitor / guard / fleet)\n`);
+  process.exit(gaps ? 1 : 0);
+}
 
 if (cmd === 'fleet') {
   // Central runner: suites from many repos, one install per device, journeys sharded over a locked device pool.

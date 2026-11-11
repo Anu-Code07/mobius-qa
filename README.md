@@ -36,6 +36,7 @@ node src/cli.ts replay  scenarios/fixture --device <id>     # deterministic repl
 node src/cli.ts monitor scenarios/fixture --device <id> --every 15m --slack <webhook-url> --live
 node src/cli.ts guard   scenarios/fixture --device <id> --build 4.12.0 --live             # CI: exit 1 blocks the rollout
 node src/cli.ts discover --app com.example.shop --device <id>                             # propose journeys to watch
+node src/cli.ts import-maestro .maestro/flows --platform android --app com.example.shop   # guard existing Maestro flows
 node src/cli.ts release --artifact app-release.apk --notes fastlane/metadata --guard scenarios --device <id>   # go / no-go
 ```
 
@@ -43,6 +44,7 @@ node src/cli.ts release --artifact app-release.apk --notes fastlane/metadata --g
 - `monitor`: replays on schedule, heals on UI drift, retries every failure once to triage it (**bug · flake · UI change · infra**), pages Slack only for confirmed bugs (with a failure screenshot), and files a Jira ticket with repro steps when `JIRA_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT` are set. `--once` for a single pass.
 - `guard`: the **release guard**. Runs every journey against a build, compares with the last good build, and exits 1 (block the rollout) on a new failure or a step that got ≥1.5× and ≥1 s slower. Writes a Markdown summary for the PR (also to `$GITHUB_STEP_SUMMARY`). Example workflow: [docs/examples/release-guard.yml](docs/examples/release-guard.yml).
 - `discover --app <id>`: the agent explores the app like a new user (every approval rejected) and proposes the journeys worth watching as ready-to-run scenario files in `scenarios/proposed/`. You approve; it monitors.
+- `import-maestro <flows>`: **bring your Maestro flows, get them guarded.** Each Maestro flow becomes a Mobius replay script plus a plain-English scenario. `runFlow` subflows are inlined, `${VARS}` expanded, and taps, typing, assertions, scrolls, swipes, keys and links are converted. From then on every step runs **through Mobius** (approvals, masking, audit), replays cost $0, and when the UI drifts the agent heals it. Anything that can't be converted faithfully (point taps, random input, `when:` conditions) is listed, never silently dropped. Imported journeys are `approvals: rejected` by default.
 - `release --artifact app.apk|app.ipa`: the **release manager**. One go/no-go for a mobile release:
   - **Build:** same app id, build number goes up, not debuggable, signed with the release key (not the debug key), 64-bit native code.
   - **Store rules:** Play target API level; iOS privacy manifest and export-compliance key; release notes present for every locale (`--notes <fastlane metadata>`).

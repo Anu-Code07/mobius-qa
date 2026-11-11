@@ -70,6 +70,13 @@ export function compile(run: RunResult): ReplayScript {
 const same = (a: string | null, b: string | null | undefined) => (a ?? null) === (b ?? null);
 /** Exact identity first; then same role + any one stable field (text, label, id). Ambiguous = no match. */
 export function findElement(elements: any[], sel: Selector): any | null {
+  if (sel.role === '*') {
+    // Imported (Maestro-style) selector: visible text or label, or a resource id (with or without the package prefix).
+    const rid = (e: any) => String(e.rid ?? e.resource_id ?? '');
+    const hits = elements.filter(e => (sel.text && (e.text === sel.text || e.label === sel.text))
+      || (sel.rid && (rid(e) === sel.rid || rid(e).endsWith(`:id/${sel.rid}`) || rid(e).endsWith(`/${sel.rid}`))));
+    return hits.find(e => e.role === 'button' || (e.flags ?? []).includes?.('clickable')) ?? hits[0] ?? null;
+  }
   const exact = elements.filter(e => e.role === sel.role && same(sel.text, e.text) && same(sel.label, e.label) && same(sel.rid, e.rid ?? e.resource_id));
   if (exact.length) return exact[0];
   const keys: (keyof Selector)[] = ['rid', 'text', 'label'];
