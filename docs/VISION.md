@@ -1,43 +1,118 @@
 # mobius-qa vision
 
-**Every critical journey in every mobile app is watched by an AI that behaves like a real user, catches breakage before customers do, and is guaranteed to never spend money, send messages or leak data.**
+**An AI QA engineer that tests your mobile app the way your users will break it: it finds the bugs your team didn't think to test, proves each one with evidence, and never spends money, sends messages or leaks data while doing it.**
 
-Put simply, mobius-qa grows from a test runner into an autonomous mobile reliability engineer.
+## The problem
 
-## The problem it ends
+Developers test the path they built. Users take every other path.
 
-Today, mobile teams find out their checkout, login or booking flow broke when revenue dips, support tickets spike, or someone on call notices hours later.
+They:
+- tap Pay twice
+- lose network in a lift
+- rotate the phone mid-checkout
+- set their font to extra-large
+- switch the app to Hindi
+- deny the location permission
+- come back after the app was killed in the background
 
-Unit and UI tests run on test builds with mock data. Nobody continuously checks the real app, on real production backends, the way a user would. That's because it's unsafe (bots might buy things) and brittle (scripts break with every UI change).
+That's where crashes, stuck spinners, wrong prices, clipped buttons and "undefined" on screen come from. Those bugs reach production because nobody had the time to try thousands of combinations on real devices.
 
-mobius-qa makes that safe (via Mobius) and maintainable (via an agent that self-heals).
+Scripted UI tests only check what someone wrote down. They break with every redesign, and they never ask "what else could go wrong here?"
 
-## How it evolves
+## What mobius-qa does
 
-| Stage | What mobius-qa is | User experience | Status |
-|---|---|---|---|
-| 1. Runner | Plain-English scenarios → agent run → evidence-checked verdict + trace | "I wrote a test in English and it ran." | **Built**: verdicts are re-graded against the trace; unsupported claims fail |
-| 2. Monitor | Scheduled deterministic replays of production journeys; LLM only on drift; Slack alerts with evidence | "It told me checkout broke 4 minutes after the deploy." | **Built (v1)**: `replay`, `monitor --every`, self-healing on drift, Slack alerts on transitions |
-| 3. Release guard | Runs on every build, PR preview and staged rollout; diffs against the last release; can block a rollout | "Version 4.12 broke the coupon flow on Android, so the rollout was paused." | **Built (v1)**: `guard` diffs against the last good build, blocks on new failures and slowdowns; GitHub Actions example. Plus `release`: a full go/no-go (build, store rules, permissions/size diff, journeys, human checklist, staged rollout with monitor-driven halt) |
-| 4. Autonomous QA engineer | Crawls the app, proposes journeys, writes and maintains them, triages bug vs. flake vs. UI change, files Jira tickets | "I don't write tests. I approve the ones it suggests and fix the bugs it files." | **Built (v1)**: `discover` proposes journeys; triage (bug / flake / UI change / infra) by retry; Jira tickets with repro steps. Maintaining journeys = self-healing replays |
-| 5. Reliability layer | Per-step latency, accessibility, localization, crashes, payment-gateway health, competitor benchmarks | "It's how we know our app works for real users, everywhere, all the time." | **Started**: per-step latency, accessibility count, crash/app-exit detection on every replay. Next: localization, payment-gateway health, competitor benchmarks |
+**1. Learns the app on its own.** It explores every screen, button and route, and builds a map of the app: its screens, the flows between them, and what each screen is for (login, form, list, cart, checkout, settings). No scripts and no selectors.
+
+**2. Thinks like a hostile user.** For every screen on the map, it generates the cases developers miss, from a library that grows with every app it tests:
+
+| Category | Examples |
+|---|---|
+| Input | empty, maximum length, emoji, Hindi and other scripts, leading spaces, pasted text, script/SQL-shaped strings, invalid formats |
+| Interaction | double-tap submit, rapid back, tap during loading, swipe mid-animation, keyboard covering the button |
+| Lifecycle | rotate mid-flow, background/foreground, app killed and restored, deep link straight into a screen, session expiry |
+| Environment | offline, slow 2G, airplane mode mid-request, low battery, dark mode, largest font, another app language, permission denied, push notification mid-flow |
+| Devices | small and large screens, Android and iOS, emulators, simulators and real phones |
+
+**3. Spots bugs without being told what "correct" is.** Detectors flag problems on any screen, with no test spec:
+- **Stability:** crashes and ANRs; blank screens, spinners that never stop, screens you can't leave.
+- **Bad text:** "null", "undefined", "NaN", stack traces, untranslated keys like `home.title`, English left on a Hindi screen.
+- **Layout:** clipped, overlapping or off-screen text and buttons (comparing what's drawn with what the app declares).
+- **Money:** a price or total that changes between cart and checkout.
+- **Accessibility:** unlabeled controls, touch targets that are too small, duplicate labels.
+- **Performance:** slow launch, janky frames, memory that climbs as you navigate, battery drain.
+- **Visual change:** screens that changed from the approved baseline.
+
+**4. Proves every finding.** Each bug arrives with:
+- a video
+- screenshots
+- the exact steps
+- the device and its state (network, locale, font, theme)
+- logs and the crash trace
+- a one-command replay that reproduces it
+
+No finding is reported without evidence from the device. Flakes are re-run, and only reproducible bugs are filed.
+
+**5. Keeps the bug fixed.** Every confirmed bug becomes a replay test. It runs deterministically on every build, costs no AI tokens, and repairs itself when the UI changes.
+
+## How it runs
+
+```
+explore → map → generate edge cases → attack on a device matrix → detect → reproduce → report → regress forever
+```
+
+- **On a laptop:** `mobius-qa hunt --app com.example`. It explores, attacks and hands you an HTML report of findings.
+- **In CI:** on every build, a release guard re-runs the regression suite plus a focused hunt on the screens that changed, and can block the release.
+- **On a schedule:** production journeys are replayed every few minutes, with alerts the moment one breaks.
+- **On a fleet:** Android emulators, iOS simulators and real phones, sharded across machines.
+- **Into your tools:** Jira tickets, Slack alerts and GitHub checks.
+
+## Why it can be trusted on a real app
+
+mobius-qa drives devices through **Mobius**, the safety layer for AI agents on phones.
+- Anything that pays, books, sends or deletes needs a human's approval, and is rejected by default while testing.
+- Secrets are masked before the AI sees them.
+- Every action is checked against what's really on screen, and every step is in a signed audit log.
+
+That's what makes it safe to point at production backends and real accounts, where the real bugs live.
 
 ## Principles
 
-- **Safe on production by design.** Every run goes through Mobius policy. Nothing gets paid, sent or deleted, and secrets never reach the model. Never optional.
-- **Evidence over opinion.** Every verdict is backed by observations and a trace you can replay. No "the AI says it passed".
-- **Cheap enough to run every few minutes.** Explore with the LLM once, then replay deterministically. The LLM only steps in when something changes.
-- **Intent, not selectors.** Scenarios describe what a user wants ("book the cheapest non-stop flight"), so they survive redesigns.
-- **Fits the existing toolchain.** CI, Slack, Jira and device clouds, without replacing anything.
+- **Find what wasn't written down.** The value is in the bugs nobody planned for.
+- **Evidence over opinion.** Every verdict is backed by what the device showed, plus a replay. "The AI says it failed" is never enough.
+- **Safe by construction.** Mobius policy on every action, never optional.
+- **Cheap to run constantly.** The AI explores and invents; deterministic replays repeat. Tokens are spent only on new ground and on change.
+- **Intent, not selectors.** It understands what a screen is for, so tests survive redesigns.
+- **Fits the toolchain.** CI, Jira, Slack and device clouds, without replacing them.
+
+## Roadmap
+
+| Stage | What it adds | Status |
+|---|---|---|
+| **1. Runner** | Plain-English journeys → agent run → evidence-checked verdict | Built |
+| **2. Monitor** | Deterministic replays on a schedule; AI only on drift; Slack alerts | Built |
+| **3. Release guard** | Runs per build, diffs against the last good release, can block a rollout; release go/no-go | Built |
+| **4. Explorer** | Autonomous crawl → app map; screen classification | Next |
+| **5. Bug hunter** | Edge-case generator + detector pack + device-state matrix | Next |
+| **6. Findings** | Video, repro, replay, dedup, severity; one HTML report; Jira | Next (Jira built) |
+| **7. Learning library** | Every bug found anywhere becomes a new edge case for every app | Later |
+
+Stages 4–6 build directly on capabilities Mobius already ships:
+- **Exploration:** snapshot, screen diff, wait-until-idle, OCR.
+- **Device state:** dark mode, font scale, app locale, network, battery, permissions, GPS routes.
+- **Diagnostics:** crash watching, performance reports, accessibility audits, visual checks, bug reports.
+- **Media and replay:** screen recording, and flow recording and replay.
+
+## How we measure it
+
+- **Bugs found that the team didn't already know about**, per app per week. The number that matters.
+- **Precision:** the share of reported bugs that developers confirm as real (target above 90%).
+- **Time from build to first finding** (minutes, not days).
+- **Escapes:** production bugs that a hunt could have caught but didn't. Each one becomes a new edge case.
 
 ## What it is not
 
-- Not another "write tests in English" tool competing on price with Drizz, Quash or Maestro.
-- Not a device farm.
-- Not a replacement for unit tests. It covers the gap they can't: does the real app work for a real user right now?
+- Not a tool for writing tests in English faster. It finds the tests you would never have written.
+- Not a device farm. It runs on yours, or on any device cloud.
+- Not a replacement for unit tests. It covers what they can't: the real app, on a real device, in the hands of an unpredictable user.
 
-## How it ties to Mobius
-
-Mobius is the trust layer. mobius-qa is the first product built on it: monitoring production mobile apps is the use case where agent safety is non-negotiable and buyers exist today. Every customer run sharpens Mobius's policy intelligence, which feeds the bigger agent-plane vision.
-
-> **One-liner:** mobius-qa is an AI that uses your app like a real customer, around the clock, on production, and is guaranteed never to spend money or leak data, so you know about broken journeys before your users do.
+> **One-liner:** mobius-qa is the QA engineer who tries everything your users will: every input, every interruption, every setting. It shows you exactly what broke, with proof, before your users find it.
